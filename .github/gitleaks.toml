@@ -1,0 +1,177 @@
+# Shared gitleaks config for Rod's protected repos.
+# Used by the pre-commit hook in this directory.
+#
+# Start from gitleaks' full built-in rule set, then add ONLY confirmed
+# false-positive exemptions below. Keep the allowlist tight — every entry is a
+# hole in the net, so justify each with a comment and the date it was added.
+
+title = "Rod shared gitleaks config"
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Custom rules (2026-08-13) — close gaps verified empirically against the
+# default rule set. Each was reproduced with `gitleaks stdin` before the rule
+# was written: a Postgres URI carrying a live password and a legacy `sk-`
+# OpenAI key both passed straight through the defaults.
+#
+# These matter beyond commits: the same config gates the session-transcript
+# ingester, so a miss here would embed a live credential into a semantically
+# searchable index.
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id = "rod-postgres-connection-uri"
+description = "PostgreSQL connection URI with an embedded password"
+regex = '''postgres(?:ql)?://[A-Za-z0-9._~%+-]+:([^@\s/"'`<>]{6,})@[A-Za-z0-9._-]+'''
+secretGroup = 1
+keywords = ["postgres://", "postgresql://"]
+tags = ["database", "credential", "rod-custom"]
+
+  [[rules.allowlists]]
+  description = """
+  2026-08-13: Two git-tracked files whose PURPOSE is to contain credential-shaped
+  strings — a secrets-redaction test and the safety gate's own self-test fixture.
+  Verified by scanning all 29 protected repos: these were the ONLY tracked files
+  this rule newly flagged (the other 52 hits were gitignored .env files, Xcode
+  build output, and .pyc bytecode, none of which a staged-diff hook ever sees).
+  Scoped to this rule only, so every other gitleaks rule still applies to them.
+
+  2026-09-21 (backlog e741af22): widened safety_gate.py from a path anchored on
+  Security's own scripts/ directory to a basename match. Cloud-session gate
+  support now vendors this exact file into .claude/cloud-gate/ in OTHER repos
+  (rodsnyder/Security stays private, so a cloud VM can't clone it directly --
+  see Security's cloud/sync-vendor.sh), and claude-code-guide's vendored copy
+  tripped this rule fresh at its new path, first hit verified by hand against
+  the file's own "Redacted - OSC-7 escape sequence..." test-case comment
+  before this fix landed (commit 647c6f3 bypassed with GITLEAKS_SKIP=1 in the
+  meantime). No other file is plausibly named exactly safety_gate.py, so
+  matching by basename regardless of parent directory carries the same
+  no-real-credential-masking guarantee as the original path-anchored version,
+  and covers every future vendored copy without a per-repo edit each time.
+  """
+  paths = [
+    '''scripts/test-secrets-redaction\.mjs$''',
+    '''(?:^|/)safety_gate\.py$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Documentation/example placeholders, not real credentials"
+  regexTarget = "secret"
+  regexes = [
+    '''(?i)^(?:password|passwd|pass|pwd|secret|changeme|change_me|your[-_]?password|my[-_]?password|placeholder|example|sample|dummy|fake|test|testing|postgres|admin|root|user|username|redacted|null|none|todo|abc123|123456\d*|x{3,}|\*{3,}|\.{3,})$''',
+    '''^\$\{\{?.*\}?\}$''',
+    '''^\{\{.*\}\}$''',
+    '''^%[A-Za-z_]+%$''',
+  ]
+
+[[rules]]
+id = "rod-openai-api-key"
+description = "OpenAI API key (sk- / sk-proj-)"
+regex = '''\b(sk-(?:proj-)?[A-Za-z0-9]{32,})\b'''
+secretGroup = 1
+keywords = ["sk-"]
+tags = ["openai", "credential", "rod-custom"]
+
+[[rules]]
+id = "rod-openrouter-api-key"
+description = "OpenRouter API key (sk-or-v1-)"
+regex = '''\b(sk-or-v1-[A-Za-z0-9]{32,})\b'''
+secretGroup = 1
+keywords = ["sk-or-v1-"]
+tags = ["openrouter", "credential", "rod-custom"]
+
+# 2026-09-11: converted from the legacy singular `[allowlist]` table to
+# `[[allowlists]]` because gitleaks 8.30 refuses to load a config that mixes
+# the two forms, and the scoped Sourcegraph exemption below needs the new form
+# (targetRules/condition/regexTarget). Keys and OR semantics are unchanged.
+[[allowlists]]
+description = "Global false-positive exemptions (justify each entry)"
+
+# Never scan the scanner's own config.
+paths = [
+  '''git-hooks/gitleaks\.toml$''',
+  '''gitleaks\.toml$''',
+  # 2026-08-15: bin/safety-gate-canary's entire purpose is to embed a fixture
+  # command line matching all nine of safety_gate.py's REDACTION_PATTERNS
+  # shapes (api-key, aws-access-key-id, google-api-key, jwt, github-token,
+  # slack-token, otpauth-uri, notion-token, db-connection-string) - built to
+  # be format-conformant enough to trigger the gate's own regexes, which is
+  # exactly what also trips gitleaks' default aws-access-token/gcp-api-key/jwt
+  # rules. Every value carries the CANARYFAKE sentinel (H10) and is a fixed,
+  # synthetic literal, not a live credential - same reasoning as the
+  # sk-live12345678901234567890 exemption below, one file up.
+  '''bin/safety-gate-canary$''',
+]
+
+# 2026-07-12: Airtable BASE IDs (app + 14 alnum) are non-secret identifiers that
+# appear in URLs/API docs; gitleaks' airtable-api-key rule over-matches them.
+# Real Airtable secrets start with key.../pat..., never app..., so this cannot
+# mask a genuine Airtable credential. (Confirmed FP in hooks/handoff-2026-05-11.json.)
+regexes = [
+  '''app[A-Za-z0-9]{14}''',
+  # 2026-08-02: Synthetic self-test key in Security/scripts/safety_gate.py, used only in the
+  # safety-gate unit-test fixtures to prove the gate blocks credential exfiltration. It is a
+  # fixed, non-secret literal (all digits after the prefix); an exact-match exemption cannot
+  # mask any real credential. Replaces an invalid bare-path .gitleaksignore entry that gitleaks
+  # was silently dropping (a .gitleaksignore fingerprint is path:rule:line, and line-based
+  # fingerprints break every time the file shifts).
+  '''sk-live12345678901234567890''',
+  # 2026-08-23: value-based exemption for the CANARYFAKE sentinel itself (see
+  # safety_gate.py's _FAKE_VALUE_SENTINEL_REGEX and bin/safety-gate-canary's
+  # $SENTINEL). Every fixture built to exercise the gate's own detection paths
+  # embeds this literal token in the secret value on purpose (H10). The
+  # path-only exemption above for bin/safety-gate-canary, plus the
+  # postgres-rule-only exemption for scripts/safety_gate.py, only ever covered
+  # a subset of gitleaks' DEFAULT rules (gcp-api-key, aws-access-token, jwt,
+  # generic-api-key) that those same fixtures also trip - and repo_scan.py's
+  # gitleaks invocation didn't even load this config file until the same fix
+  # that added this entry, so none of it applied during real scans regardless
+  # (ai_brain.security_findings shows the same 3 fixture files re-flagged on
+  # every periodic scan: bin/safety-gate-canary, scripts/safety_gate.py,
+  # scripts/test-secrets-redaction.mjs). A value-based match on the sentinel
+  # itself closes the gap for all of them at once, and for any future fixture
+  # that carries the same marker, without blanket-exempting whole files.
+  '''CANARYFAKE[A-Za-z0-9]*''',
+  # 2026-08-23 (backlog 7d826b4f): rod-snyder-pkm's redaction-unit-test fixtures
+  # (scripts/test-secrets-redaction.mjs, scripts/test-semantic-errors.mjs) use a
+  # different but equally recognizable synthetic convention - sequential-alphabet
+  # runs and abc.../123... placeholder suffixes - instead of the CANARYFAKE
+  # sentinel. Adding a `gitleaks:allow` comment to the CURRENT file only stops
+  # future scans from re-flagging the current commit; gitleaks scans full git
+  # HISTORY by default, so the commits that introduced these fixtures still trip
+  # the same rules regardless of what the file says today. A value-based
+  # allowlist is the only fix that reaches into history without rewriting it.
+  # No real credential generator produces contiguous a-z runs or the literal
+  # strings below, so this cannot mask a genuine leak.
+  '''abcdefghijklmnop[A-Za-z0-9]*''',
+  '''abcdef123456''',
+  '''abc123xyz789''',
+]
+
+# 2026-09-11 (backlog 03baaaa8): gitleaks' default sourcegraph-access-token rule
+# accepts a BARE 40-hex string (no sgp_ prefix) once the file contains the
+# keyword "sourcegraph". Claude Code's plugin marketplace cache satisfies both by
+# construction: it lists a plugin named sourcegraph, and every entry carries git
+# commit SHAs under "sha"/"source_sha"/"commit" keys. 58 of the 128 "literal"
+# fingerprints in the daily sweep were these SHAs (verified: 0 sgp_ prefixes in
+# either file, 100% of matches sit under a sha-named JSON key).
+# Scoped three ways so it cannot mask a real token: (1) only this rule, (2) only
+# the two vendor-written cache files, (3) only matches that are bare hex - a
+# genuine sgp_... token in these files still fires (positive control kept in
+# the 2026-09-11 AGENT_LOG entry).
+[[allowlists]]
+description = "Git commit SHAs in Claude Code plugin marketplace cache (sourcegraph rule over-match)"
+targetRules = ["sourcegraph-access-token"]
+condition = "AND"
+paths = [
+  '''plugins/marketplaces/[^/]+/\.claude-plugin/marketplace\.json$''',
+  '''plugins/plugin-catalog-cache\.json$''',
+  # Claude Code tool-result dumps (Read/Grep output of memory + git files):
+  # bare commit SHAs next to the "sourcegraph" plugin name. Added 2026-09-17
+  # (03baaaa8); same bare-hex-only constraint, so an sgp_ token still fires.
+  '''\.claude/projects/[^/]+/[^/]+/tool-results/[^/]+\.txt$''',
+]
+regexTarget = "secret"
+regexes = ['''^[a-fA-F0-9]{40}$''']
