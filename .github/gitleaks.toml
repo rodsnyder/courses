@@ -53,17 +53,40 @@ tags = ["database", "credential", "rod-custom"]
   """
   paths = [
     '''scripts/test-secrets-redaction\.mjs$''',
-    '''(?:^|/)safety_gate\.py$''',
+    # 2026-11-07 (backlog d4bb25c3): pinned to the only two tracked locations
+    # (checked across every repo and all history: Security scripts/ and the
+    # claude-code-guide cloud-gate vendor copy). The 2026-09-21 basename match
+    # exempted a file of that name in ANY directory of ANY repo.
+    '''^scripts/safety_gate\.py$''',
+    '''^\.claude/cloud-gate/safety_gate\.py$''',
   ]
 
   [[rules.allowlists]]
   description = "Documentation/example placeholders, not real credentials"
   regexTarget = "secret"
   regexes = [
-    '''(?i)^(?:password|passwd|pass|pwd|secret|changeme|change_me|your[-_]?password|my[-_]?password|placeholder|example|sample|dummy|fake|test|testing|postgres|admin|root|user|username|redacted|null|none|todo|abc123|123456\d*|x{3,}|\*{3,}|\.{3,})$''',
+    '''(?i)^(?:password|passwd|pass|pwd|secret|changeme|change_me|your[-_]?password|my[-_]?password|placeholder|example|sample|dummy|fake|test|testing|username|redacted|null|none|todo|abc123|x{3,}|\*{3,}|\.{3,})$''',
     '''^\$\{\{?.*\}?\}$''',
     '''^\{\{.*\}\}$''',
     '''^%[A-Za-z_]+%$''',
+  ]
+
+  [[rules.allowlists]]
+  description = """
+  2026-11-07 (backlog d4bb25c3): the stock Postgres default login (user postgres,
+  password postgres) against a loopback host ONLY. This is the throwaway Postgres
+  service container that CI workflows start (found in the full history of
+  memory-server and semantic-memory; history cannot be rewritten, so every
+  full-history scan would otherwise flag them forever). It replaces the old
+  any-host exemption for the bare passwords postgres/admin/root/user/123456 in
+  the placeholder list above, which also hid the same password against a real,
+  remote host. The whole match must be exactly this shape: another user, another
+  password, a port-less lookalike host such as localhost.example.net, or any
+  non-loopback host still fires.
+  """
+  regexTarget = "match"
+  regexes = [
+    '''^postgres(?:ql)?://postgres:postgres@(?:localhost|127\.0\.0\.1)$''',
   ]
 
 [[rules]]
@@ -105,12 +128,14 @@ paths = [
   '''bin/safety-gate-canary$''',
 ]
 
-# 2026-07-12: Airtable BASE IDs (app + 14 alnum) are non-secret identifiers that
-# appear in URLs/API docs; gitleaks' airtable-api-key rule over-matches them.
-# Real Airtable secrets start with key.../pat..., never app..., so this cannot
-# mask a genuine Airtable credential. (Confirmed FP in hooks/handoff-2026-05-11.json.)
+# Global value exemptions. Every entry here applies to EVERY rule, so keep each
+# one an exact synthetic literal or sentinel, never a broad pattern.
+#
+# (The Airtable base-id exemption, 2026-07-12, used to live here as an
+# unanchored pattern and so masked any secret that merely contained "app" plus
+# 14 characters. Moved 2026-11-07 (backlog d4bb25c3) to a scoped allowlist
+# at the end of this file.)
 regexes = [
-  '''app[A-Za-z0-9]{14}''',
   # 2026-08-02: Synthetic self-test key in Security/scripts/safety_gate.py, used only in the
   # safety-gate unit-test fixtures to prove the gate blocks credential exfiltration. It is a
   # fixed, non-secret literal (all digits after the prefix); an exact-match exemption cannot
@@ -175,3 +200,16 @@ paths = [
 ]
 regexTarget = "secret"
 regexes = ['''^[a-fA-F0-9]{40}$''']
+
+# 2026-11-07 (backlog d4bb25c3): Airtable BASE IDs (app + 14 alnum) are
+# non-secret identifiers that appear in URLs and API docs; gitleaks'
+# airtable-api-key rule over-matches them. Real Airtable secrets start with
+# key... or pat..., never app... (confirmed FP in hooks/handoff-2026-05-11.json).
+# Replaces the 2026-07-12 global pattern, which was unanchored and applied to
+# every rule. Scoped to the one rule, and the whole secret must be exactly a
+# base id, so a longer value that merely contains one still fires.
+[[allowlists]]
+description = "Airtable base IDs (airtable-api-key rule over-match)"
+targetRules = ["airtable-api-key"]
+regexTarget = "secret"
+regexes = ['''^app[A-Za-z0-9]{14}$''']
